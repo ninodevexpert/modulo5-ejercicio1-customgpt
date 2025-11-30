@@ -1,8 +1,23 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { Box, Container, Stack, Text, useColorModeValue } from '@chakra-ui/react'
+import {
+  Box,
+  Container,
+  Stack,
+  Text,
+  useColorModeValue,
+  useToast,
+} from '@chakra-ui/react'
+import OpenAI from 'openai'
 import ChatHeader from './components/ChatHeader'
 import MessageList from './components/MessageList'
 import Composer from './components/Composer'
+import { OPENAI_MODEL_OPTIONS } from './constants/openaiModels'
+
+const OPENAI_API_KEY = import.meta.env.VITE_OPENAI_API_KEY
+const DEFAULT_MODEL = import.meta.env.VITE_OPENAI_MODEL ?? OPENAI_MODEL_OPTIONS[0].value
+const openaiClient = OPENAI_API_KEY
+  ? new OpenAI({ apiKey: OPENAI_API_KEY, dangerouslyAllowBrowser: true })
+  : null
 
 const createId = () =>
   typeof crypto !== 'undefined' && crypto.randomUUID
@@ -19,31 +34,18 @@ const createGreetingMessage = () => ({
   id: createId(),
   role: 'assistant',
   content:
-    'Hola, soy AI EXPERT CUSTOM CHAT. Comparte contexto sobre tu reto y prepararé la mejor respuesta cuando la integración esté lista.',
+    'Hola, soy AI EXPERT CUSTOM CHAT. Selecciona un modelo de OpenAI y dime qué necesitas; me encargaré de generar la mejor respuesta posible.',
   timestamp: getTimestamp(),
 })
 
-const initialMessages = [
-  createGreetingMessage(),
-  {
-    id: 'user-1',
-    role: 'user',
-    content: 'Necesito una interfaz moderna para mi chat con modo oscuro y claro.',
-    timestamp: getTimestamp(),
-  },
-  {
-    id: 'assistant-1',
-    role: 'assistant',
-    content:
-      'Perfecto. Puedo mostrarte un layout con el historial, el editor de mensajes y un botón de envío, listo para conectar a la API pronto.',
-    timestamp: getTimestamp(),
-  },
-]
+const initialMessages = [createGreetingMessage()]
 
 function App() {
   const [messages, setMessages] = useState(() => initialMessages)
   const [isTyping, setIsTyping] = useState(false)
+  const [model, setModel] = useState(DEFAULT_MODEL)
   const scrollRef = useRef(null)
+  const toast = useToast()
   const panelBg = useColorModeValue('rgba(255,255,255,0.8)', 'rgba(15,23,42,0.75)')
   const borderColor = useColorModeValue('blackAlpha.200', 'whiteAlpha.200')
   const pageGradient = useColorModeValue(
@@ -57,7 +59,8 @@ function App() {
     container.scrollTo({ top: container.scrollHeight, behavior: 'smooth' })
   }, [messages, isTyping])
 
-  const handleSend = (text) => {
+  const handleSend = async (text) => {
+    if (isTyping) return
     const userMessage = {
       id: createId(),
       role: 'user',
@@ -65,22 +68,71 @@ function App() {
       timestamp: getTimestamp(),
     }
 
-    setMessages((prev) => [...prev, userMessage])
-    setIsTyping(true)
+    const nextMessages = [...messages, userMessage]
+    setMessages(nextMessages)
 
-    setTimeout(() => {
+    if (!openaiClient) {
+      toast({
+        title: 'Configura tu API Key',
+        description: 'Define VITE_OPENAI_API_KEY en tu entorno para contactar OpenAI.',
+        status: 'warning',
+      })
       setMessages((prev) => [
         ...prev,
         {
           id: createId(),
           role: 'assistant',
           content:
-            'Estoy listo para integrarme con la API de GPT. Mientras tanto, esta es una respuesta simulada para mantener la experiencia visual.',
+            'Necesito una API key válida para OpenAI. Añádela en el archivo .env (VITE_OPENAI_API_KEY) y vuelve a intentarlo.',
           timestamp: getTimestamp(),
         },
       ])
+      return
+    }
+
+    setIsTyping(true)
+
+    try {
+      const completion = await openaiClient.chat.completions.create({
+        model,
+        messages: nextMessages.map(({ role, content }) => ({ role, content })),
+      })
+
+      const assistantContent = completion.choices?.[0]?.message?.content?.trim()
+
+      if (assistantContent) {
+        setMessages((prev) => [
+          ...prev,
+          {
+            id: createId(),
+            role: 'assistant',
+            content: assistantContent,
+            timestamp: getTimestamp(),
+          },
+        ])
+      } else {
+        throw new Error('Respuesta vacía del modelo.')
+      }
+    } catch (error) {
+      console.error('OpenAI error', error)
+      toast({
+        title: 'No pude obtener respuesta',
+        description: error?.message ?? 'Revisa tus créditos o el modelo seleccionado.',
+        status: 'error',
+      })
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: createId(),
+          role: 'assistant',
+          content:
+            'Hubo un problema al contactar OpenAI. Revisa la consola o tu clave y vuelve a intentarlo.',
+          timestamp: getTimestamp(),
+        },
+      ])
+    } finally {
       setIsTyping(false)
-    }, 900)
+    }
   }
 
   const handleNewChat = () => {
@@ -88,7 +140,15 @@ function App() {
     setMessages([createGreetingMessage()])
   }
 
-  const messageCountLabel = useMemo(() => `${messages.length} mensajes en esta sesión`, [messages.length])
+  const activeModelLabel = useMemo(() => {
+    const selected = OPENAI_MODEL_OPTIONS.find((option) => option.value === model)
+    return selected?.label ?? model
+  }, [model])
+
+  const messageCountLabel = useMemo(
+    () => `${messages.length} mensajes · Modelo ${activeModelLabel}`,
+    [messages.length, activeModelLabel]
+  )
 
   return (
     <Box
@@ -109,7 +169,12 @@ function App() {
           boxShadow="2xl"
           p={{ base: 6, md: 10 }}
         >
-          <ChatHeader onNewChat={handleNewChat} />
+          <ChatHeader
+            onNewChat={handleNewChat}
+            models={OPENAI_MODEL_OPTIONS}
+            model={model}
+            onModelChange={setModel}
+          />
           <Text fontSize="sm" color="gray.500">
             {messageCountLabel}
           </Text>
